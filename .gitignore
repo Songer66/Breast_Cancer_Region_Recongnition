@@ -1,0 +1,26 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Virtual environments
+.venv/
+venv/
+.env
+
+# Runtime outputs
+inference/wsi_inference_results/
+inference/final_results/
+inference/wsi_test_output/
+inference/dataset_test_output/
+*.log
+
+# Large raw data files
+*.svs
+*.kfb
+*.tif
+*.tiff
+*.ndpi
+*.mrxs
+
+# Optional local checkpoints (keep best_model.pt in repo root if needed)
+checkpoints/

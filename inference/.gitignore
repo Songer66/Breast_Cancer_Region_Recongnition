@@ -1,0 +1,29 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Runtime outputs
+final_results/
+wsi_test_output/
+dataset_test_output/
+wsi_inference_results/
+*.log
+
+# Model weights and checkpoints
+*.pt
+*.pth
+*.bin
+*.safetensors
+
+# Large slide/image files
+*.svs
+*.kfb
+*.tif
+*.tiff
+*.ndpi
+*.mrxs
+
+# Environment files
+.env
+.venv/
+venv/
