@@ -8,6 +8,8 @@
 2. 动态切块与批量推理
 3. 肿瘤概率热力图生成
 
+
+
 ---
 
 ## 1. 仓库结构
@@ -92,7 +94,7 @@ python inference/main_inference.py \
   --tissue_thresh 0.1 \
   --batch_size 32 \
   --num_workers 8 \
-  --hidden_dim 256 \
+  --hidden_dim 512 \
   --alpha 0.5
 ```
 
@@ -155,7 +157,3 @@ sudo apt-get install -y openslide-tools libopenslide0
 
 ---
 
-## 8. 发布建议
-
-- 建议代码与文档开源。
-- 若 `best_model.pt` 较大，建议通过 GitHub Releases 或 HuggingFace Hub 分发，并在 README 中放下载链接。
