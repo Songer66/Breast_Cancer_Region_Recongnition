@@ -2,6 +2,12 @@ import os
 import cv2
 import numpy as np
 from PIL import Image
+from typing import Tuple
+
+try:
+    import pyvips
+except ImportError:
+    pyvips = None
 
 class HeatmapGenerator:
     def __init__(self, patch_size: int = 512, alpha: float = 0.5):
@@ -79,3 +85,92 @@ class HeatmapGenerator:
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
         cv2.imwrite(save_path, blended)
         print(f"✅ 柔和版热力图已成功保存至: {save_path}")
+
+    def _build_patch_probability_grid(self, results: list, level_0_dimensions: Tuple[int, int]) -> np.ndarray:
+        level_0_w, level_0_h = level_0_dimensions
+        grid_w = int(np.ceil(level_0_w / self.patch_size))
+        grid_h = int(np.ceil(level_0_h / self.patch_size))
+
+        grid = np.full((grid_h, grid_w), -1.0, dtype=np.float32)
+        count = np.zeros((grid_h, grid_w), dtype=np.uint16)
+
+        for res in results:
+            gx = int(res["x"]) // self.patch_size
+            gy = int(res["y"]) // self.patch_size
+            if 0 <= gx < grid_w and 0 <= gy < grid_h:
+                prob = float(res["prob"])
+                if grid[gy, gx] < 0:
+                    grid[gy, gx] = prob
+                    count[gy, gx] = 1
+                else:
+                    # 对重复命中的网格做在线平均，避免覆盖带来的随机性
+                    cnt = int(count[gy, gx])
+                    grid[gy, gx] = (grid[gy, gx] * cnt + prob) / (cnt + 1)
+                    count[gy, gx] = cnt + 1
+
+        return grid
+
+    def generate_pyramidal_tiff(
+        self,
+        results: list,
+        level_0_dimensions: Tuple[int, int],
+        save_path: str,
+        compression: str = "jpeg",
+        tile_size: int = 256,
+        colormap: str = "jet",
+    ):
+        if pyvips is None:
+            raise RuntimeError(
+                "pyvips 未安装，无法输出金字塔 TIF。请先安装 libvips 与 pyvips。"
+            )
+
+        print(f"-> 正在生成金字塔 TIF 热力图，共有 {len(results)} 个有效区块...")
+        level_0_w, level_0_h = level_0_dimensions
+        grid = self._build_patch_probability_grid(results, level_0_dimensions)
+
+        valid_mask = (grid >= 0).astype(np.float32)
+        safe_grid = np.maximum(grid, 0.0)
+
+        k_size = 5
+        smoothed_grid = cv2.GaussianBlur(safe_grid, (k_size, k_size), 0)
+        smoothed_mask = cv2.GaussianBlur(valid_mask, (k_size, k_size), 0)
+        final_grid = (smoothed_grid / (smoothed_mask + 1e-5)) * valid_mask
+
+        heatmap_uint8 = np.clip(final_grid * 255, 0, 255).astype(np.uint8)
+        if colormap == "gray":
+            color_grid = cv2.cvtColor(heatmap_uint8, cv2.COLOR_GRAY2RGB)
+        else:
+            color_grid = cv2.cvtColor(
+                cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET),
+                cv2.COLOR_BGR2RGB
+            )
+
+        zero_mask = (valid_mask == 0)
+        color_grid[zero_mask] = 0
+
+        grid_h, grid_w = color_grid.shape[:2]
+        vips_img = pyvips.Image.new_from_memory(
+            color_grid.tobytes(),
+            grid_w,
+            grid_h,
+            3,
+            "uchar"
+        )
+
+        scale_x = max(1.0, level_0_w / float(grid_w))
+        scale_y = max(1.0, level_0_h / float(grid_h))
+        upscaled = vips_img.resize(scale_x, vscale=scale_y, kernel="nearest")
+        upscaled = upscaled.crop(0, 0, level_0_w, level_0_h)
+
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        upscaled.tiffsave(
+            save_path,
+            tile=True,
+            tile_width=tile_size,
+            tile_height=tile_size,
+            pyramid=True,
+            compression=compression,
+            bigtiff=True,
+            Q=90
+        )
+        print(f"✅ 金字塔 TIF 热力图已成功保存至: {save_path}")

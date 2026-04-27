@@ -42,6 +42,28 @@ def parse_args():
     # 模型架构与可视化参数
     parser.add_argument("--hidden_dim", type=int, default=256, help="分类头的隐藏层维度 (需与训练时保持绝对一致)")
     parser.add_argument("--alpha", type=float, default=0.5, help="热力图透明度 (0.0~1.0)")
+    parser.add_argument(
+        "--output_format",
+        type=str,
+        default="both",
+        choices=["png", "tif", "both"],
+        help="输出格式：png 预览图、tif 金字塔热力图，或二者都输出"
+    )
+    parser.add_argument(
+        "--tif_compression",
+        type=str,
+        default="jpeg",
+        choices=["jpeg", "deflate", "lzw", "none"],
+        help="金字塔 TIF 压缩方式"
+    )
+    parser.add_argument("--tif_tile_size", type=int, default=256, help="金字塔 TIF 的 Tile 大小")
+    parser.add_argument(
+        "--heatmap_colormap",
+        type=str,
+        default="jet",
+        choices=["jet", "gray"],
+        help="热力图颜色映射"
+    )
     
     return parser.parse_args()
 
@@ -50,7 +72,8 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     
     slide_name = os.path.splitext(os.path.basename(args.wsi_path))[0]
-    heatmap_save_path = os.path.join(args.output_dir, f"{slide_name}_heatmap.png")
+    heatmap_png_path = os.path.join(args.output_dir, f"{slide_name}_heatmap.png")
+    heatmap_tif_path = os.path.join(args.output_dir, f"{slide_name}_heatmap_pyramid.tif")
     
     print("\n" + "="*60)
     print(f" 🌟 WSI 智能推理流水线启动: {slide_name}")
@@ -64,6 +87,7 @@ def main():
     print("\n[1/4] 正在解析 WSI 并提取有效组织坐标...")
     try:
         reader = WSIReader(args.wsi_path, patch_size=args.patch_size, tissue_thresh=args.tissue_thresh)
+        level_0_dimensions = reader.level_0_dimensions
         valid_coords, downsample = reader.get_valid_patch_coordinates()
         # 顺便再调一次 get_tissue_mask 拿到 rgb 缩略图给可视化用
         _, _, thumb_img = reader.get_tissue_mask()
@@ -112,12 +136,22 @@ def main():
     # =====================================================================
     print("\n[4/4] 绘制并输出肿瘤热力图 (Heatmap)...")
     visualizer = HeatmapGenerator(patch_size=args.patch_size, alpha=args.alpha)
-    visualizer.generate(
-        results=results, 
-        thumb_img=thumb_img, 
-        downsample=downsample, 
-        save_path=heatmap_save_path
-    )
+    if args.output_format in ["png", "both"]:
+        visualizer.generate(
+            results=results,
+            thumb_img=thumb_img,
+            downsample=downsample,
+            save_path=heatmap_png_path
+        )
+    if args.output_format in ["tif", "both"]:
+        visualizer.generate_pyramidal_tiff(
+            results=results,
+            level_0_dimensions=level_0_dimensions,
+            save_path=heatmap_tif_path,
+            compression=args.tif_compression,
+            tile_size=args.tif_tile_size,
+            colormap=args.heatmap_colormap,
+        )
 
     # =====================================================================
     # 终点：性能统计
@@ -128,7 +162,10 @@ def main():
     print(f" ⏱️  总耗时: {total_time:.2f} 秒")
     print(f" 📊  处理 Patch 数量: {len(valid_coords)}")
     print(f" 🚀  推理速度: {len(valid_coords) / max(total_time, 0.001):.2f} Patch/秒")
-    print(f" 📁  热力图保存至: {heatmap_save_path}")
+    if args.output_format in ["png", "both"]:
+        print(f" 📁  PNG 热力图保存至: {heatmap_png_path}")
+    if args.output_format in ["tif", "both"]:
+        print(f" 📁  金字塔 TIF 热力图保存至: {heatmap_tif_path}")
     print("="*60 + "\n")
 
 if __name__ == "__main__":

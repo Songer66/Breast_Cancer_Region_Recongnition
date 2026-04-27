@@ -17,11 +17,12 @@
 
 ### 1) 系统依赖（Linux）
 
-`openslide-python` 依赖系统库 `openslide`，先安装：
+`openslide-python` 依赖系统库 `openslide`，`pyvips` 依赖系统库 `libvips`，先安装：
 
 ```bash
 sudo apt-get update
 sudo apt-get install -y openslide-tools libopenslide0
+sudo apt-get install -y libvips libvips-dev
 ```
 
 ### 2) Python 依赖
@@ -48,10 +49,22 @@ python main_inference.py \
   --batch_size 32 \
   --num_workers 8 \
   --hidden_dim 256 \
-  --alpha 0.5
+  --alpha 0.5 \
+  --output_format both \
+  --tif_compression jpeg \
+  --tif_tile_size 256 \
+  --heatmap_colormap jet
 ```
 
 > 注意：`--hidden_dim` 必须和训练 `PatchBinaryHead` 时保持一致。
+
+## 输出说明
+
+- `--output_format png`：仅输出缩略图叠加热力图（`*_heatmap.png`）
+- `--output_format tif`：仅输出金字塔热力图（`*_heatmap_pyramid.tif`）
+- `--output_format both`：同时输出 `png + tif`
+
+其中 `*_heatmap_pyramid.tif` 为可缩放多层级（pyramidal）TIFF，适合在病理大图查看器中浏览。
 
 ## 建议上传到 GitHub 的内容
 
