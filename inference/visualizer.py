@@ -115,7 +115,7 @@ class HeatmapGenerator:
         results: list,
         level_0_dimensions: Tuple[int, int],
         save_path: str,
-        compression: str = "jpeg",
+        compression: str = "deflate",  # 🚨 必须修改：jpeg不支持透明度，这里默认改为 deflate (或 lzw)
         tile_size: int = 256,
         colormap: str = "jet",
     ):
@@ -124,18 +124,21 @@ class HeatmapGenerator:
                 "pyvips 未安装，无法输出金字塔 TIF。请先安装 libvips 与 pyvips。"
             )
 
-        print(f"-> 正在生成金字塔 TIF 热力图，共有 {len(results)} 个有效区块...")
+        print(f"-> 正在生成带透明通道(RGBA)的金字塔 TIF 热力图，共有 {len(results)} 个有效区块...")
         level_0_w, level_0_h = level_0_dimensions
         grid = self._build_patch_probability_grid(results, level_0_dimensions)
 
+        # 提取有效区域 Mask
         valid_mask = (grid >= 0).astype(np.float32)
         safe_grid = np.maximum(grid, 0.0)
 
+        # 平滑处理
         k_size = 5
         smoothed_grid = cv2.GaussianBlur(safe_grid, (k_size, k_size), 0)
         smoothed_mask = cv2.GaussianBlur(valid_mask, (k_size, k_size), 0)
         final_grid = (smoothed_grid / (smoothed_mask + 1e-5)) * valid_mask
 
+        # 转换为伪彩色 RGB
         heatmap_uint8 = np.clip(final_grid * 255, 0, 255).astype(np.uint8)
         if colormap == "gray":
             color_grid = cv2.cvtColor(heatmap_uint8, cv2.COLOR_GRAY2RGB)
@@ -145,15 +148,95 @@ class HeatmapGenerator:
                 cv2.COLOR_BGR2RGB
             )
 
-        zero_mask = (valid_mask == 0)
-        color_grid[zero_mask] = 0
+        # ==========================================
+        # 🚀 核心修改区域：添加 Alpha 透明通道
+        # ==========================================
+        # 生成 Alpha 通道：有组织的地方不透明(255)，无组织(背景)完全透明(0)
+        alpha_channel = (valid_mask * 255).astype(np.uint8)
+        
+        # 分离 RGB 并与 Alpha 合并成 4 通道的 RGBA
+        r, g, b = cv2.split(color_grid)
+        rgba_grid = cv2.merge((r, g, b, alpha_channel))
 
-        grid_h, grid_w = color_grid.shape[:2]
+        grid_h, grid_w = rgba_grid.shape[:2]
+        
+        # 写入 pyvips 时，通道数从 3 改为 4
         vips_img = pyvips.Image.new_from_memory(
-            color_grid.tobytes(),
+            rgba_grid.tobytes(),
             grid_w,
             grid_h,
-            3,
+            4, 
+            "uchar"
+        )
+        # ==========================================
+
+        scale_x = max(1.0, level_0_w / float(grid_w))
+        scale_y = max(1.0, level_0_h / float(grid_h))
+        
+        # 🚀 核心修改 2：将 "nearest" 改为 "linear"，彻底消除高倍率下的马赛克锯齿
+        upscaled = vips_img.resize(scale_x, vscale=scale_y, kernel="linear")
+        upscaled = upscaled.crop(0, 0, level_0_w, level_0_h)
+
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        
+        # 强制检查压缩格式
+        if compression.lower() == "jpeg":
+            print("⚠️ 警告: JPEG 不支持透明度(Alpha)通道，已自动将压缩格式切换为 'deflate'")
+            compression = "deflate"
+
+        upscaled.tiffsave(
+            save_path,
+            tile=True,
+            tile_width=tile_size,
+            tile_height=tile_size,
+            pyramid=True,
+            compression=compression, # 使用 deflate 或 lzw
+            bigtiff=True,
+            Q=90
+        )
+        print(f"✅ RGBA 金字塔 TIF 热力图已成功保存至: {save_path}")
+
+    def generate_probability_pyramidal_tiff(
+        self,
+        results: list,
+        level_0_dimensions: Tuple[int, int],
+        save_path: str,
+        tile_size: int = 256,
+        compression: str = "deflate",
+    ):
+        """
+        导出单通道概率金字塔 TIF：
+        - 前景区域: [0, 1] 概率映射到 [0, 255]
+        - 背景区域: 0
+        数据类型为 uint8（与彩色热力图的通道类型一致）。
+        """
+        if pyvips is None:
+            raise RuntimeError(
+                "pyvips 未安装，无法输出金字塔 TIF。请先安装 libvips 与 pyvips。"
+            )
+
+        print(f"-> 正在生成单通道概率金字塔 TIF，共有 {len(results)} 个有效区块...")
+        level_0_w, level_0_h = level_0_dimensions
+        grid = self._build_patch_probability_grid(results, level_0_dimensions)
+
+        valid_mask = (grid >= 0).astype(np.float32)
+        safe_grid = np.maximum(grid, 0.0)
+
+        k_size = 5
+        smoothed_grid = cv2.GaussianBlur(safe_grid, (k_size, k_size), 0)
+        smoothed_mask = cv2.GaussianBlur(valid_mask, (k_size, k_size), 0)
+        prob_grid = (smoothed_grid / (smoothed_mask + 1e-5)) * valid_mask
+
+        # 转为 uint8：概率 [0,1] -> [0,255]，背景设为 0
+        prob_uint8 = np.clip(prob_grid * 255.0, 0, 255).astype(np.uint8)
+        prob_uint8 = np.where(valid_mask > 0, prob_uint8, 0).astype(np.uint8)
+
+        grid_h, grid_w = prob_uint8.shape
+        vips_img = pyvips.Image.new_from_memory(
+            prob_uint8.tobytes(),
+            grid_w,
+            grid_h,
+            1,
             "uchar"
         )
 
@@ -161,6 +244,9 @@ class HeatmapGenerator:
         scale_y = max(1.0, level_0_h / float(grid_h))
         upscaled = vips_img.resize(scale_x, vscale=scale_y, kernel="nearest")
         upscaled = upscaled.crop(0, 0, level_0_w, level_0_h)
+
+        if compression.lower() in {"jpeg", "none"}:
+            compression = "deflate"
 
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
         upscaled.tiffsave(
@@ -170,7 +256,6 @@ class HeatmapGenerator:
             tile_height=tile_size,
             pyramid=True,
             compression=compression,
-            bigtiff=True,
-            Q=90
+            bigtiff=True
         )
-        print(f"✅ 金字塔 TIF 热力图已成功保存至: {save_path}")
+        print(f"✅ 单通道概率金字塔 TIF 已成功保存至: {save_path}")

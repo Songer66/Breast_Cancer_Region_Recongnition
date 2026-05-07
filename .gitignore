@@ -8,10 +8,14 @@ venv/
 .env
 
 # Runtime outputs
+wsi_inference_results/
 inference/wsi_inference_results/
 inference/final_results/
 inference/wsi_test_output/
 inference/dataset_test_output/
+*_heatmap.png
+*_heatmap_pyramid.tif
+*_probability_pyramid.tif
 *.log
 
 # Large raw data files
@@ -24,3 +28,6 @@ inference/dataset_test_output/
 
 # Optional local checkpoints (keep best_model.pt in repo root if needed)
 checkpoints/
+
+# Accidental files from malformed multiline shell commands
+--*
