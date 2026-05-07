@@ -1,54 +1,46 @@
 # WSI Inference For Breast Cancer
 
-基于 `ViT-H + PatchBinaryHead` 的乳腺癌全切片（WSI）推理与热力图生成项目。
+基于 `ViT-H + PatchBinaryHead` 的乳腺癌 WSI 推理项目。输入 `.svs` 切片后，自动完成组织区域筛选、512 级别切块推理，并输出可浏览的热力图结果。
 
-本仓库支持输入 `.svs` 切片，自动完成：
+## 功能概览
 
-1. 组织区域提取（过滤背景）
-2. 动态切块与批量推理
-3. 肿瘤概率热力图生成
-
-![图片描述](/BRACS_1003708_heatmap.png)
-
-
----
-
-## 1. 仓库结构
+- 支持 `SVS` 读取（`KFB` 目前为占位逻辑）
+- 基于组织 mask 过滤背景区域，减少无效 patch
+- 动态读取 `512x512` patch 并批量推理
+- 自动从 `best_model.pt` 推断 `hidden_dim`，避免维度配置错误
+- 输出三类结果：
+  - `*_heatmap.png`（缩略图叠加预览）
+  - `*_heatmap_pyramid.tif`（RGBA 彩色金字塔 TIF，`uint8`）
+  - `*_probability_pyramid.tif`（单通道概率金字塔 TIF，`uint8`）
+- CPU 模式支持显式线程控制，充分利用多核
+## 仓库结构
 
 ```text
 wsi-inference/
-├── best_model.pt                 # 你训练得到的最佳分类头权重（需自行放置）
-├── model.py                      # PatchBinaryHead 定义
+├── best_model.pt
+├── model.py
+├── README.md
 └── inference/
-    ├── main_inference.py         # 主入口
-    ├── engine.py                 # 推理引擎（ViT + Head）
-    ├── wsi_reader.py             # WSI读取与组织mask
-    ├── wsi_dataset.py            # 动态Patch数据集
-    ├── visualizer.py             # 热力图生成
+    ├── main_inference.py
+    ├── engine.py
+    ├── wsi_reader.py
+    ├── wsi_dataset.py
+    ├── visualizer.py
     ├── requirements.inference.txt
-    └── .gitignore
+    └── README.md
 ```
 
----
+## 环境安装
 
-## 2. 环境要求
-
-### 2.1 Python 版本
-
-- 推荐：`Python 3.10+`
-
-### 2.2 系统依赖（Linux）
-
-`openslide-python` 依赖系统动态库，请先安装：
+### 1) 系统依赖（Linux）
 
 ```bash
 sudo apt-get update
 sudo apt-get install -y openslide-tools libopenslide0
+sudo apt-get install -y libvips libvips-dev
 ```
 
-### 2.3 Python 依赖安装
-
-在仓库根目录执行：
+### 2) Python 依赖
 
 ```bash
 python -m venv .venv
@@ -57,104 +49,104 @@ pip install --upgrade pip
 pip install -r inference/requirements.inference.txt
 ```
 
----
+## 权重准备
 
-## 3. 权重准备
+- `--vit_weights`：本地 ViT-H 目录（需包含 `config.json` 与模型参数文件）
+- `--head_weights`：你训练的 `best_model.pt`
 
-你需要准备两类权重：
-
-1. `ViT-H` 主干权重目录（本项目通过 `transformers.ViTModel.from_pretrained` 加载）
-2. `best_model.pt`（你训练得到的 `PatchBinaryHead` 权重）
-
-### 3.1 best_model.pt 放置位置
-
-推荐放在仓库根目录：
+示例：
 
 ```text
-wsi-inference/best_model.pt
+/path/to/vith_weight/
+  ├── config.json
+  └── pytorch_model.bin
 ```
 
-### 3.2 ViT-H 权重要求
-
-- 参数 `--vit_weights` 传入的是“本地目录”，目录内应包含 HuggingFace 需要的模型文件（如 `config.json`、模型参数文件等）。
-- 该目录必须可被 `ViTModel.from_pretrained(..., local_files_only=True)` 正常识别。
-
----
-
-## 4. 快速开始（推理一张WSI）
+## 运行示例
 
 在仓库根目录执行：
 
 ```bash
 python inference/main_inference.py \
-  --wsi_path /path/to/your_slide.svs \
-  --vit_weights /path/to/your_vit_h_dir \
-  --head_weights ./best_model.pt \
-  --output_dir /path/to/save_results \
+  --wsi_path /path/to/slide.svs \
+  --vit_weights /path/to/vith_weight \
+  --head_weights /path/to/best_model.pt \
+  --output_dir ./wsi_inference_results \
   --patch_size 512 \
   --tissue_thresh 0.1 \
   --batch_size 32 \
   --num_workers 8 \
-  --hidden_dim 512 \
-  --alpha 0.5
+  --output_format both \
+  --tif_compression deflate \
+  --tif_tile_size 256 \
+  --heatmap_colormap jet
 ```
 
----
+说明：
 
-## 5. 参数说明
+- `--hidden_dim` 可省略，程序会从 `--head_weights` 自动推断
+- 若手动传 `--hidden_dim`，必须和权重一致
 
-- `--wsi_path`：输入切片路径，当前重点支持 `.svs`
-- `--vit_weights`：ViT-H 本地权重目录
-- `--head_weights`：分类头权重路径（`best_model.pt`）
-- `--output_dir`：输出目录，保存热力图
-- `--patch_size`：Level 0 下切块大小，默认 `512`
+## CPU 多核加速（不降精度）
+
+```bash
+python inference/main_inference.py \
+  --wsi_path /path/to/slide.svs \
+  --vit_weights /path/to/vith_weight \
+  --head_weights /path/to/best_model.pt \
+  --output_dir ./wsi_inference_results \
+  --device cpu \
+  --cpu_num_threads 96 \
+  --cpu_interop_threads 8 \
+  --batch_size 16 \
+  --num_workers 2 \
+  --output_format both
+```
+
+参数建议：
+
+- `cpu_num_threads`：先设为 `nproc` 或接近 `nproc`
+- `cpu_interop_threads`：建议 `4~8`
+- `num_workers`：CPU 模式建议 `1~4`，过高容易抢算力
+
+## 关键参数说明
+
+- `--wsi_path`：输入 WSI 路径（当前主支持 `.svs`）
+- `--output_dir`：输出目录
+- `--patch_size`：Level 0 切块大小，默认 `512`
 - `--tissue_thresh`：组织占比阈值，默认 `0.1`
-- `--batch_size`：推理批大小，按显存调节
-- `--num_workers`：DataLoader worker 数
-- `--hidden_dim`：分类头隐藏层维度，必须与训练时一致
-- `--alpha`：热力图叠加透明度
+- `--batch_size`：推理 batch 大小
+- `--num_workers`：DataLoader 线程数
+- `--device`：`cuda` 或 `cpu`
+- `--output_format`：`png` / `tif` / `both`
+- `--tif_compression`：`jpeg` / `deflate` / `lzw` / `none`
+- `--heatmap_colormap`：`jet` / `gray`（用于彩色 TIF）
 
----
+## 输出文件说明
 
-## 6. 输出结果
+- `*_heatmap.png`：缩略图融合热力图，便于快速查看
+- `*_heatmap_pyramid.tif`：RGBA 彩色金字塔 TIFF（4 通道 `uint8`）
+- `*_probability_pyramid.tif`：单通道概率金字塔 TIFF（1 通道 `uint8`，背景为 0）
 
-运行成功后，将在 `--output_dir` 下生成：
+## 常见问题
 
-- `{slide_name}_heatmap.png`：最终热力图
+### 1) `OpenSlide is required for .svs files`
 
-终端会打印：
-
-- 总耗时
-- Patch 总数
-- 推理速度（Patch/s）
-
----
-
-## 7. 常见问题
-
-### Q1: 报错 `OpenSlide is required for .svs files`
-
-说明系统缺少 OpenSlide 动态库，先安装：
+未安装 OpenSlide 系统库，执行：
 
 ```bash
 sudo apt-get install -y openslide-tools libopenslide0
 ```
 
-### Q2: `hidden_dim` 不匹配导致加载权重失败
+### 2) `hidden_dim` mismatch
 
-请确保 `--hidden_dim` 与训练 `best_model.pt` 时一致，否则会出现维度不匹配。
+删掉 `--hidden_dim` 让程序自动推断，或手动改成与权重一致。
 
-### Q3: CUDA 显存不足
+### 3) CPU 很慢
 
-尝试：
+- 确认 `--device cpu --cpu_num_threads ...` 已设置
+- 适当增大 `--batch_size`（如 8/16/24 对比）
+- 降低 `--num_workers`（通常 1~4 更稳）
+### 4) `pyvips` 相关报错
 
-- 降低 `--batch_size`
-- 降低 `--num_workers`
-- 或设置 `--device cpu`
-
-### Q4: ViT权重加载失败
-
-确认 `--vit_weights` 是可被 HuggingFace 正确识别的本地模型目录，而不是单个错误文件路径。
-
----
-
+确认系统已安装 `libvips`，并在当前 Python 环境中安装 `pyvips`。

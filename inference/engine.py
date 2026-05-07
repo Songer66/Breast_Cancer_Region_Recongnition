@@ -1,12 +1,14 @@
 import torch
 import torch.nn as nn
+from contextlib import nullcontext
 from tqdm import tqdm
 from transformers import ViTModel
+from typing import Optional, Dict
 # 这里假设你的分类头在 model.py 中，名为 PatchBinaryHead
 from model import PatchBinaryHead
 
 class WSIInferenceEngine:
-    def __init__(self, vit_weights_path: str, head_weights_path: str, hidden_dim: int = 512, device: str = 'cuda'):
+    def __init__(self, vit_weights_path: str, head_weights_path: str, hidden_dim: Optional[int] = None, device: str = 'cuda'):
         """
         初始化级联推理引擎
         :param vit_weights_path: HuggingFace ViT-H 的本地权重路径
@@ -25,10 +27,6 @@ class WSIInferenceEngine:
         self.vit.to(self.device)
         self.vit.eval()
         
-        # 2. 加载 分类头 (MLP)
-        print("-> 正在加载 Patch 分类头...")
-        self.head = PatchBinaryHead(in_dim=1280, hidden_dim=hidden_dim, dropout=0.0)
-        
         # 解析并加载你训练好的权重字典
         state_dict = torch.load(head_weights_path, map_location=self.device)
         # 如果你训练时用了 DDP，保存的字典 key 会带有 'module.' 前缀，需要剔除
@@ -39,12 +37,34 @@ class WSIInferenceEngine:
         for k, v in state_dict.items():
             clean_key = k.replace('module.', '') if k.startswith('module.') else k
             clean_state_dict[clean_key] = v
-            
+
+        inferred_hidden_dim = self._infer_hidden_dim_from_state_dict(clean_state_dict)
+        if hidden_dim is None:
+            hidden_dim = inferred_hidden_dim
+            print(f"-> 自动识别 hidden_dim = {hidden_dim}")
+        elif hidden_dim != inferred_hidden_dim:
+            raise ValueError(
+                f"hidden_dim 不匹配：参数为 {hidden_dim}，但权重推断为 {inferred_hidden_dim}。"
+                " 请移除 --hidden_dim 或改为与权重一致。"
+            )
+
+        # 2. 加载 分类头 (MLP)
+        print("-> 正在加载 Patch 分类头...")
+        self.head = PatchBinaryHead(in_dim=1280, hidden_dim=hidden_dim, dropout=0.0)
         self.head.load_state_dict(clean_state_dict)
         self.head.to(self.device)
         self.head.eval()
         
         print("✅ 级联模型加载完毕！")
+
+    def _infer_hidden_dim_from_state_dict(self, state_dict: Dict[str, torch.Tensor]) -> int:
+        fc_key = "net.0.weight"
+        if fc_key not in state_dict:
+            raise KeyError(f"在分类头权重中未找到 {fc_key}，无法自动推断 hidden_dim。")
+        tensor = state_dict[fc_key]
+        if tensor.ndim != 2:
+            raise ValueError(f"{fc_key} 维度异常：期望2维，实际{tensor.ndim}维。")
+        return int(tensor.shape[0])
 
     @torch.no_grad()
     def run_inference(self, dataloader) -> list:
@@ -60,16 +80,21 @@ class WSIInferenceEngine:
         # 使用 tqdm 显示进度条
         for tensors, xs, ys in tqdm(dataloader, desc="WSI 推理中", unit="batch"):
             tensors = tensors.to(self.device, non_blocking=True)
-            
-            # 🚀 开启半精度 (FP16) 加速推理，显存占用减半，速度翻倍
-            with torch.autocast(device_type=self.device.type, dtype=torch.float16):
+
+            # CPU 上禁用 autocast，保持 FP32 精度且通常更快；CUDA 保持 FP16 加速
+            if self.device.type == "cuda":
+                amp_context = torch.autocast(device_type="cuda", dtype=torch.float16)
+            else:
+                amp_context = nullcontext()
+
+            with amp_context:
                 # 1. 提特征
                 vit_outputs = self.vit(pixel_values=tensors)
                 if vit_outputs.pooler_output is not None:
                     feats = vit_outputs.pooler_output
                 else:
                     feats = vit_outputs.last_hidden_state[:, 0]
-                
+
                 # 2. 过分类头
                 logits = self.head(feats)
                 # 3. Sigmoid 将 logits 转换为 0~1 的概率

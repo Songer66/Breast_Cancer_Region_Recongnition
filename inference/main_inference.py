@@ -3,6 +3,7 @@ import os
 import sys
 import time
 import torch
+import multiprocessing
 from torch.utils.data import DataLoader
 
 # =====================================================================
@@ -38,19 +39,58 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=32, help="推理 Batch Size (根据显存大小调整)")
     parser.add_argument("--num_workers", type=int, default=8, help="DataLoader 多线程数量")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="推理设备")
+    parser.add_argument("--cpu_num_threads", type=int, default=0, help="CPU 计算线程数，0 表示自动使用全部核心")
+    parser.add_argument("--cpu_interop_threads", type=int, default=0, help="CPU 算子间并行线程数，0 表示自动")
     
     # 模型架构与可视化参数
-    parser.add_argument("--hidden_dim", type=int, default=256, help="分类头的隐藏层维度 (需与训练时保持绝对一致)")
+    parser.add_argument(
+        "--hidden_dim",
+        type=int,
+        default=None,
+        help="分类头隐藏层维度；默认自动从 --head_weights 中推断"
+    )
     parser.add_argument("--alpha", type=float, default=0.5, help="热力图透明度 (0.0~1.0)")
+    parser.add_argument(
+        "--output_format",
+        type=str,
+        default="both",
+        choices=["png", "tif", "both"],
+        help="输出格式：png 预览图、tif 金字塔热力图，或二者都输出"
+    )
+    parser.add_argument(
+        "--tif_compression",
+        type=str,
+        default="jpeg",
+        choices=["jpeg", "deflate", "lzw", "none"],
+        help="金字塔 TIF 压缩方式"
+    )
+    parser.add_argument("--tif_tile_size", type=int, default=256, help="金字塔 TIF 的 Tile 大小")
+    parser.add_argument(
+        "--heatmap_colormap",
+        type=str,
+        default="jet",
+        choices=["jet", "gray"],
+        help="热力图颜色映射"
+    )
     
     return parser.parse_args()
 
 def main():
     args = parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
+
+    if args.device == "cpu":
+        total_cores = multiprocessing.cpu_count()
+        compute_threads = total_cores if args.cpu_num_threads <= 0 else args.cpu_num_threads
+        interop_threads = max(1, min(4, compute_threads // 4)) if args.cpu_interop_threads <= 0 else args.cpu_interop_threads
+        torch.set_num_threads(compute_threads)
+        torch.set_num_interop_threads(interop_threads)
+        print(f"[CPU优化] 启用计算线程: {compute_threads}, 算子间线程: {interop_threads}, 物理核心(逻辑): {total_cores}")
     
     slide_name = os.path.splitext(os.path.basename(args.wsi_path))[0]
-    heatmap_save_path = os.path.join(args.output_dir, f"{slide_name}_heatmap.png")
+    heatmap_png_path = os.path.join(args.output_dir, f"{slide_name}_heatmap.png")
+    heatmap_tif_path = os.path.join(args.output_dir, f"{slide_name}_heatmap_pyramid.tif")
+    prob_tif_path = os.path.join(args.output_dir, f"{slide_name}_probability_pyramid.tif")
     
     print("\n" + "="*60)
     print(f" 🌟 WSI 智能推理流水线启动: {slide_name}")
@@ -64,6 +104,7 @@ def main():
     print("\n[1/4] 正在解析 WSI 并提取有效组织坐标...")
     try:
         reader = WSIReader(args.wsi_path, patch_size=args.patch_size, tissue_thresh=args.tissue_thresh)
+        level_0_dimensions = reader.level_0_dimensions
         valid_coords, downsample = reader.get_valid_patch_coordinates()
         # 顺便再调一次 get_tissue_mask 拿到 rgb 缩略图给可视化用
         _, _, thumb_img = reader.get_tissue_mask()
@@ -86,7 +127,7 @@ def main():
         batch_size=args.batch_size, 
         shuffle=False, 
         num_workers=args.num_workers, 
-        pin_memory=True
+        pin_memory=(args.device == "cuda")
     )
 
     # =====================================================================
@@ -112,12 +153,29 @@ def main():
     # =====================================================================
     print("\n[4/4] 绘制并输出肿瘤热力图 (Heatmap)...")
     visualizer = HeatmapGenerator(patch_size=args.patch_size, alpha=args.alpha)
-    visualizer.generate(
-        results=results, 
-        thumb_img=thumb_img, 
-        downsample=downsample, 
-        save_path=heatmap_save_path
-    )
+    if args.output_format in ["png", "both"]:
+        visualizer.generate(
+            results=results,
+            thumb_img=thumb_img,
+            downsample=downsample,
+            save_path=heatmap_png_path
+        )
+    if args.output_format in ["tif", "both"]:
+        visualizer.generate_pyramidal_tiff(
+            results=results,
+            level_0_dimensions=level_0_dimensions,
+            save_path=heatmap_tif_path,
+            compression=args.tif_compression,
+            tile_size=args.tif_tile_size,
+            colormap=args.heatmap_colormap,
+        )
+        visualizer.generate_probability_pyramidal_tiff(
+            results=results,
+            level_0_dimensions=level_0_dimensions,
+            save_path=prob_tif_path,
+            tile_size=args.tif_tile_size,
+            compression=args.tif_compression,
+        )
 
     # =====================================================================
     # 终点：性能统计
@@ -128,7 +186,11 @@ def main():
     print(f" ⏱️  总耗时: {total_time:.2f} 秒")
     print(f" 📊  处理 Patch 数量: {len(valid_coords)}")
     print(f" 🚀  推理速度: {len(valid_coords) / max(total_time, 0.001):.2f} Patch/秒")
-    print(f" 📁  热力图保存至: {heatmap_save_path}")
+    if args.output_format in ["png", "both"]:
+        print(f" 📁  PNG 热力图保存至: {heatmap_png_path}")
+    if args.output_format in ["tif", "both"]:
+        print(f" 📁  金字塔 TIF 热力图保存至: {heatmap_tif_path}")
+        print(f" 📁  单通道概率金字塔 TIF 保存至: {prob_tif_path}")
     print("="*60 + "\n")
 
 if __name__ == "__main__":
